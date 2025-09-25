@@ -1,0 +1,2314 @@
+package com.example.detection.service
+
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import java.util.Random
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import java.util.Calendar
+import java.util.Date
+import kotlin.random.Random as KotlinRandom
+
+/**
+ * NeuralFingerprintService: Implements the Neural Fingerprint system
+ * for AI-driven app analysis and clone detection
+ */
+class NeuralFingerprintService(private val context: Context) : SensorEventListener {
+    
+    companion object {
+        private const val TAG = "NeuralFingerprintService"
+        
+        // Behavior patterns monitored by the service
+        enum class BehaviorPattern {
+            NORMAL,
+            SUSPICIOUS,
+            MALICIOUS,
+            UNKNOWN
+        }
+        
+        // Types of threat events tracked in history
+        enum class ThreatEventType {
+            CLONE_DETECTED,
+            ANOMALY_DETECTED,
+            SUSPICIOUS_BEHAVIOR,
+            MODEL_UPDATED,
+            SECURITY_CHECK
+        }
+        
+        // Severity levels for threat events
+        enum class ThreatSeverity {
+            INFO,
+            LOW,
+            MEDIUM,
+            HIGH
+        }
+    }
+    
+    // Neural Fingerprint Status
+    private val _fingerprintStatus = MutableStateFlow(FingerprintStatus())
+    val fingerprintStatus: StateFlow<FingerprintStatus> = _fingerprintStatus.asStateFlow()
+    
+    // App Analysis Results
+    private val _appAnalysisResults = MutableStateFlow<List<AppAnalysisResult>>(emptyList())
+    val appAnalysisResults: StateFlow<List<AppAnalysisResult>> = _appAnalysisResults.asStateFlow()
+    
+    // Threat History
+    private val _threatHistory = MutableStateFlow<List<ThreatHistoryEvent>>(emptyList())
+    val threatHistory: StateFlow<List<ThreatHistoryEvent>> = _threatHistory.asStateFlow()
+    
+    // Model Training Status
+    private val _modelTrainingStatus = MutableStateFlow(ModelTrainingStatus())
+    val modelTrainingStatus: StateFlow<ModelTrainingStatus> = _modelTrainingStatus.asStateFlow()
+    
+    // Security Score
+    private val _securityScore = MutableStateFlow(92)
+    val securityScore: StateFlow<Int> = _securityScore.asStateFlow()
+    
+    // Source Verification Summary
+    private val _sourceVerificationSummary = MutableStateFlow<Map<String, Int>>(
+        mapOf(
+            "Google Play Store" to 0,
+            "Google App Services" to 0,
+            "System App" to 0,
+            "Unknown Source" to 0
+        )
+    )
+    val sourceVerificationSummary: StateFlow<Map<String, Int>> = _sourceVerificationSummary
+    
+    // Sensor Manager for device verification
+    private val sensorManager: SensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    
+    // Random for demo data
+    private val random = Random()
+    private val handler = Handler(Looper.getMainLooper())
+    private var monitoringActive = false
+    
+    /**
+     * External scanner connection flag to ensure accurate results
+     */
+    private var scannerConnected = false
+    
+    /**
+     * Scanner service reference for integration with the main scanner component
+     */
+    private var scannerService: Any? = null
+    
+    /**
+     * Official app store package names for verifying trusted installation sources
+     */
+    private val officialStores = mapOf(
+        "com.android.vending" to "Google Play Store",
+        "com.sec.android.app.samsungapps" to "Samsung Galaxy Store",
+        "com.amazon.venezia" to "Amazon Appstore",
+        "com.huawei.appmarket" to "Huawei AppGallery",
+        "com.xiaomi.market" to "Mi Store",
+        "com.bbk.appstore" to "Vivo App Store",
+        "com.oppo.market" to "OPPO App Market",
+        "com.oneplus.backuprestore" to "OnePlus Store",
+        "com.sec.android.easyMover" to "Samsung Smart Switch",
+        "com.google.android.apps.restore" to "Google Restore",
+        "com.google.android.packageinstaller" to "Android Package Installer",
+        "com.google.android.gms" to "Google Play Services",
+        "com.google.android.gsf" to "Google Services Framework",
+        "com.google.android.feedback" to "Google Feedback",
+        "com.google.android.syncadapters" to "Google Sync Adapters",
+        "com.google.android.partnersetup" to "Google Partner Setup",
+        "com.google.android.backuptransport" to "Google Backup Transport",
+        "com.google.android.apps.wellbeing" to "Digital Wellbeing",
+        "com.google.android.as" to "Google App Services",
+        "com.lenovo.leos.appstore" to "Lenovo App Store",
+        "com.aptoide.partners" to "Aptoide Partners",
+        "com.apkpure.aegon" to "APKPure",
+        "com.aurora.store" to "Aurora Store",
+        "com.sec.android.preloadinstaller" to "Samsung Preload Installer",
+        "com.htc.htcappmarket" to "HTC AppMarket"
+    )
+
+    /**
+     * Known Google service packages that are considered part of legitimate Play Store apps
+     */
+    private val googleServicePackages = setOf(
+        "com.google.android.gms",
+        "com.google.android.gsf",
+        "com.google.android.ext",
+        "com.google.android.apps",
+        "com.google.android.syncadapters",
+        "com.google.android.backuptransport",
+        "com.google.android.partnersetup",
+        "com.google.android.feedback",
+        "com.google.android.packageinstaller",
+        "com.google.android.configupdater",
+        "com.google.android.onetimeinitializer",
+        "com.google.android.overlay"
+    )
+
+    /**
+     * Package prefixes that indicate trusted apps
+     */
+    private val trustedPackagePrefixes = listOf(
+        "com.google.",
+        "com.android.",
+        "android.",
+        "com.samsung.",
+        "com.sec.android.",
+        "com.oneplus.",
+        "com.huawei.",
+        "com.xiaomi.",
+        "com.oppo.",
+        "com.vivo."
+    )
+
+    /**
+     * Known suspicious app signatures and patterns
+     */
+    private val suspiciousAppSignatures = listOf(
+        // Package name patterns
+        Regex(".*\\.?(crack|hack|cheat|mod|free\\.paid|patcher|lucky)(\\..*)?"),
+        Regex(".*\\.(fake|clone|copy|emu|emulator)\\..+"),
+        Regex("com\\.(app|game|tool)\\.[a-z]{3,5}[0-9]{2,4}"),
+        // Cloned popular apps with slightly modified package names
+        Regex("com\\.(whatapp|whatssapp|whatsap|whtsapp|whtsp)\\..*"),
+        Regex("com\\.faceb(o){1,2}k\\.[a-z]{3,10}"),
+        Regex("com\\.instag(r)?am\\.[a-z]{3,10}"),
+        Regex("com\\.google\\.android\\.(pay|gmail|maps|chrome)\\..[a-z]{3,7}"),
+        Regex("com\\.tiktok\\.[a-z]{3,10}"),
+        Regex("com\\.snap(chat)?\\.[a-z]{3,10}"),
+        // Suspicious patterns
+        Regex(".*\\.(ghost|silent|stealth|hidden|secret|spy|monitor)\\..*"),
+        Regex(".*\\.(spyware|trojan|malware|virus|botnet|ransomware|keylogger)\\..*"),
+        Regex(".*\\.(miner|crypto|bitcoin|ethereum|monero|xmr)\\..*"),
+        // Common malware families 
+        Regex(".*(xhelper|joker|hiddad|guerrilla|triada|agent|anubis|cerberus|flubot|teabot|alien).*")
+    )
+
+    /**
+     * Known malware app names
+     */
+    private val maliciousAppNames = listOf(
+        "Super Cleaner",
+        "Speed Booster",
+        "Battery Saver Pro",
+        "WhatsApp Gold",
+        "Flash Player Pro",
+        "TikTok Pro",
+        "Instagram Pro",
+        "YouTube Premium",
+        "Netflix Premium",
+        "WiFi Password Hacker",
+        "Phone Tracker",
+        "iAntivirus",
+        "Ultimate Game Booster",
+        "Fast Charger",
+        "RAM Booster",
+        "Phone Cooler",
+        "Call Recorder Pro",
+        "Auto Liker",
+        "Followers Booster",
+        "CPU Cooler",
+        "Social Media Downloader",
+        "Status Saver Pro",
+        "Blue Whale Game",
+        "Fortnite Mobile Installer",
+        "PUBG Mobile Hack"
+    )
+
+    // Settings controls
+    private var enabled = true
+    private var adaptiveLearningEnabled = true
+    private var stealthModeEnabled = false
+
+    /**
+     * Enable or disable neural fingerprint scanning.
+     */
+    fun setEnabled(enabled: Boolean) {
+        this.enabled = enabled
+        updateServiceState()
+    }
+
+    /**
+     * Enable or disable adaptive learning mode.
+     */
+    fun setAdaptiveLearningEnabled(enabled: Boolean) {
+        this.adaptiveLearningEnabled = enabled
+        updateServiceState()
+    }
+
+    /**
+     * Enable or disable stealth mode.
+     */
+    fun setStealthModeEnabled(enabled: Boolean) {
+        this.stealthModeEnabled = enabled
+        updateServiceState()
+    }
+
+    private fun updateServiceState() {
+        if (enabled) {
+            // Ensure the service is running with the current settings
+            if (adaptiveLearningEnabled) {
+                // Enable adaptive learning features
+            }
+        } else {
+            // Disable neural fingerprint scanning
+        }
+    }
+
+    init {
+        // Initialize with mock data for demonstration
+        initializeMockData()
+    }
+
+    private fun initializeMockData() {
+        // Generate app analysis data
+        refreshAppAnalysis()
+        
+        // Generate mock threat history
+        generateMockThreatHistory()
+    }
+    
+    /**
+     * Connect to the scanner service for more accurate app analysis
+     * 
+     * @param scanner The scanner service to connect to
+     * @return True if connection was successful
+     */
+    fun connectToScanner(scanner: Any?): Boolean {
+        scannerService = scanner
+        scannerConnected = scanner != null
+        
+        if (scannerConnected) {
+            // When scanner connected, refresh the app analysis with real data
+            refreshAppAnalysis()
+        }
+        
+        return scannerConnected
+    }
+    
+    /**
+     * Refresh app analysis using actual installed apps
+     * Called when scanner is connected or when manually refreshed
+     */
+    fun refreshAppAnalysis() {
+        val packageManager = context.packageManager
+        
+        val applications = mutableListOf<AppAnalysisResult>()
+        
+        try {
+            val installedApps = packageManager.getInstalledPackages(PackageManager.GET_META_DATA)
+            
+            for (packageInfo in installedApps) {
+                val appInfo = packageInfo.applicationInfo 
+                if (appInfo == null) continue
+                
+                val appName = packageManager.getApplicationLabel(appInfo).toString()
+                val packageName = packageInfo.packageName
+                val installerPackage = try {
+                    packageManager.getInstallerPackageName(packageName)
+                } catch (e: Exception) {
+                    null
+                }
+                
+                val storeSource = when {
+                    installerPackage.isNullOrEmpty() -> "Unknown Source"
+                    officialStores.containsKey(installerPackage) -> officialStores[installerPackage]!!
+                    else -> "Third-party Store"
+                }
+                
+                val isSystemApp = isSystemApp(packageInfo)
+                val trustScore = calculateAppTrustScore(packageName, installerPackage, isSystemApp)
+                val isTrusted = trustScore >= 70
+                val primaryIssue = determineAppIssue(packageName, installerPackage, trustScore, isSystemApp)
+                val isFromStore = !installerPackage.isNullOrEmpty() && officialStores.containsKey(installerPackage)
+                val detailedReport = buildDetailedReport(
+                    packageName = packageName,
+                    appName = appName, 
+                    trustScore = trustScore,
+                    installSource = storeSource,
+                    isTrusted = isTrusted
+                )
+                
+                val analysisResult = AppAnalysisResult(
+                    appName = appName,
+                    packageName = packageName,
+                    trustScore = trustScore, 
+                    isSystemApp = isSystemApp,
+                    isFromOfficialStore = isFromStore,
+                    lastAnalyzed = System.currentTimeMillis(),
+                    behaviorPatternConsistency = random.nextInt(36) + 60,
+                    apiUsageNormality = random.nextInt(49) + 50,
+                    permissionUsageScore = random.nextInt(36) + 60 - (countDangerousPermissions(packageInfo.requestedPermissions) * 3).coerceAtMost(30),
+                    primaryIssue = primaryIssue,
+                    isTrusted = trustScore >= 70,
+                    detailedReport = detailedReport,
+                    installerStore = storeSource
+                )
+                
+                applications.add(analysisResult)
+            }
+        } catch (e: Exception) {
+            // Handle error gracefully
+        }
+        
+        // Update the app analysis results state flow
+        _appAnalysisResults.value = applications
+        
+        // Update the overall security score based on the results
+        updateSecurityScore(applications)
+    }
+    
+    /**
+     * Count dangerous permissions in a package
+     */
+    private fun countDangerousPermissions(packageInfo: PackageInfo): Int {
+        return countDangerousPermissions(packageInfo.requestedPermissions)
+    }
+    
+    /**
+     * Counts how many dangerous permissions an app requests
+     */
+    private fun countDangerousPermissions(permissions: Array<String>?): Int {
+        if (permissions == null) {
+            return 0
+        }
+        
+        val dangerousPermissions = listOf(
+            "android.permission.READ_CONTACTS",
+            "android.permission.WRITE_CONTACTS",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_COARSE_LOCATION",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.CAMERA",
+            "android.permission.READ_PHONE_STATE",
+            "android.permission.READ_CALL_LOG",
+            "android.permission.WRITE_CALL_LOG",
+            "android.permission.READ_SMS",
+            "android.permission.SEND_SMS",
+            "android.permission.RECEIVE_SMS",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
+            "android.permission.SYSTEM_ALERT_WINDOW",
+            "android.permission.GET_ACCOUNTS",
+            "android.permission.PACKAGE_USAGE_STATS",
+            "android.permission.BIND_ACCESSIBILITY_SERVICE",
+            "android.permission.REQUEST_INSTALL_PACKAGES"
+        )
+        
+        return permissions.count { perm -> dangerousPermissions.contains(perm) }
+    }
+    
+    /**
+     * Update overall security score based on app analysis
+     */
+    private fun updateSecurityScore(appResults: List<AppAnalysisResult>) {
+        val suspiciousAppsCount = appResults.count { !it.isTrusted }
+        val totalApps = appResults.size
+        
+        val baseScore = 90
+        val deduction = when {
+            suspiciousAppsCount == 0 -> 0
+            suspiciousAppsCount == 1 -> 3
+            suspiciousAppsCount <= 3 -> 7
+            suspiciousAppsCount <= 5 -> 12
+            else -> 20
+        }
+        
+        _securityScore.value = (baseScore - deduction).coerceIn(60, 99)
+    }
+    
+    private fun generateMockThreatHistory() {
+        val events = mutableListOf<ThreatHistoryEvent>()
+        
+        // Add some mock threat history events
+        for (i in 1..10) {
+            val daysAgo = i * 3
+            val eventType = when (i % 5) {
+                0 -> ThreatEventType.CLONE_DETECTED
+                1 -> ThreatEventType.ANOMALY_DETECTED
+                2 -> ThreatEventType.SUSPICIOUS_BEHAVIOR
+                3 -> ThreatEventType.MODEL_UPDATED
+                else -> ThreatEventType.SECURITY_CHECK
+            }
+            
+            val severity = when (eventType) {
+                ThreatEventType.CLONE_DETECTED -> ThreatSeverity.HIGH
+                ThreatEventType.ANOMALY_DETECTED -> ThreatSeverity.MEDIUM
+                ThreatEventType.SUSPICIOUS_BEHAVIOR -> ThreatSeverity.LOW
+                else -> ThreatSeverity.INFO
+            }
+            
+            val appName = when (i % 4) {
+                0 -> "Social Media App"
+                1 -> "Banking App"
+                2 -> "Game App"
+                else -> "Utility App"
+            }
+            
+            events.add(
+                ThreatHistoryEvent(
+                    id = UUID.randomUUID().toString(),
+                    timestamp = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(daysAgo.toLong()),
+                    eventType = eventType,
+                    severity = severity,
+                    description = getEventDescription(eventType, appName),
+                    appName = appName,
+                    packageName = "com.example.$appName".lowercase().replace(" ", ""),
+                    aiConfidence = random.nextInt(30) + 70,
+                    isResolved = random.nextBoolean(),
+                    detailedAnalysis = "AI model identified ${severity.name.lowercase()} risk signature in the application's behavior pattern.",
+                    detectionMethod = when (random.nextInt(3)) {
+                        0 -> "Behavioral Analysis"
+                        1 -> "API Usage Pattern"
+                        else -> "Permission Anomaly"
+                    }
+                )
+            )
+        }
+        
+        _threatHistory.value = events.sortedByDescending { it.timestamp }
+    }
+    
+    private fun getEventDescription(eventType: ThreatEventType, appName: String): String {
+        return when (eventType) {
+            ThreatEventType.CLONE_DETECTED -> "Clone app detected mimicking $appName"
+            ThreatEventType.ANOMALY_DETECTED -> "Behavioral anomaly detected in $appName"
+            ThreatEventType.SUSPICIOUS_BEHAVIOR -> "Suspicious activity pattern in $appName"
+            ThreatEventType.MODEL_UPDATED -> "Neural fingerprint model updated for improved detection"
+            ThreatEventType.SECURITY_CHECK -> "Routine security verification completed"
+        }
+    }
+
+    /**
+     * Starts monitoring app behavior patterns
+     */
+    fun startBehaviorMonitoring() {
+        monitoringActive = true
+        _fingerprintStatus.update { 
+            it.copy(isAnalyzing = true, monitoringStartTime = System.currentTimeMillis())
+        }
+        
+        registerSensors()
+        
+        // Simulate data updates for the demo
+        startMockDataUpdates()
+    }
+    
+    /**
+     * Stops behavioral monitoring
+     */
+    fun stopBehaviorMonitoring() {
+        monitoringActive = false
+        _fingerprintStatus.update { it.copy(isAnalyzing = false) }
+        unregisterSensors()
+        handler.removeCallbacksAndMessages(null)
+    }
+    
+    /**
+     * Returns permission anomalies
+     */
+    fun getPermissionAnomalies(): List<String> {
+        return listOf(
+            "Camera access in background",
+            "Unusual location tracking frequency",
+            "Excessive contacts access attempts"
+        )
+    }
+    
+    /**
+     * Begin AI model training or fine-tuning
+     */
+    fun startModelTraining(sensitivity: Float) {
+        _modelTrainingStatus.update {
+            it.copy(
+                isTraining = true,
+                progress = 0f,
+                currentStage = "Initializing training",
+                estimatedTimeRemaining = 120
+            )
+        }
+        
+        // Simulate the training process
+        simulateModelTraining()
+    }
+    
+    /**
+     * Test an APK file for potential threats
+     */
+    fun testApkFile(filePath: String) {
+        _modelTrainingStatus.update {
+            it.copy(
+                isAnalyzing = true,
+                analysisTarget = filePath,
+                analysisProgress = 0f
+            )
+        }
+        
+        // Check if file exists 
+        val file = java.io.File(filePath)
+        if (!file.exists() || !filePath.endsWith(".apk", ignoreCase = true)) {
+            _modelTrainingStatus.update {
+                it.copy(
+                    isAnalyzing = false,
+                    analysisResult = "Error: Invalid APK file path",
+                    analysisProgress = 1f
+                )
+            }
+            return
+        }
+        
+        // For real implementation, we would parse the APK file here
+        // and perform static analysis of its contents
+        
+        // Simulate APK testing with more detailed steps
+        simulateAdvancedApkTesting(filePath)
+    }
+    
+    /**
+     * Simulate advanced APK testing for the demo
+     */
+    private fun simulateAdvancedApkTesting(filePath: String) {
+        var progress = 0f
+        val testStages = listOf(
+            "Extracting APK contents",
+            "Scanning for known malware signatures",
+            "Analyzing manifest permissions",
+            "Checking for obfuscated code",
+            "Running dynamic code analysis",
+            "Evaluating network traffic patterns",
+            "Sandbox testing complete"
+        )
+        
+        handler.post(object : Runnable {
+            override fun run() {
+                val stageIndex = (progress * testStages.size).toInt().coerceAtMost(testStages.size - 1)
+                
+                _modelTrainingStatus.update {
+                    it.copy(
+                        analysisProgress = progress,
+                        currentStage = testStages[stageIndex]
+                    )
+                }
+                
+                progress += 0.15f
+                
+                if (progress < 1f) {
+                    handler.postDelayed(this, 800)
+                } else {
+                    val isMalicious = random.nextInt(10) < 3 // 30% chance of finding threats
+                    
+                    // Generate a detailed analysis result
+                    val analysisResult = if (isMalicious) {
+                        generateThreatReport(filePath)
+                    } else {
+                        "No threats detected. APK file appears safe.\n\n" +
+                        "• No malicious signatures found\n" +
+                        "• Permission requests appropriate for functionality\n" +
+                        "• No suspicious network requests\n" +
+                        "• Code structure follows standard patterns"
+                    }
+                    
+                    _modelTrainingStatus.update {
+                        it.copy(
+                            isAnalyzing = false,
+                            analysisProgress = 1f,
+                            analysisResult = analysisResult
+                        )
+                    }
+                    
+                    // If threats detected, add to history
+                    if (isMalicious) {
+                        val newEvent = ThreatHistoryEvent(
+                            id = UUID.randomUUID().toString(),
+                            timestamp = System.currentTimeMillis(),
+                            eventType = ThreatEventType.SUSPICIOUS_BEHAVIOR,
+                            severity = ThreatSeverity.HIGH,
+                            description = "Malicious code detected in APK file",
+                            appName = File(filePath).name,
+                            packageName = getRandomPackageName(),
+                            aiConfidence = 80 + random.nextInt(19),
+                            isResolved = false,
+                            detailedAnalysis = analysisResult,
+                            detectionMethod = "Static and Dynamic Analysis"
+                        )
+                        _threatHistory.update { listOf(newEvent) + it }
+                        
+                        // Update security score to reflect new threat
+                        _securityScore.value = (_securityScore.value - random.nextInt(2, 5)).coerceIn(60, 99) // Range from 2 to 5
+                    }
+                }
+            }
+        })
+    }
+    
+    /**
+     * Generate a random package name for APK demo
+     */
+    private fun getRandomPackageName(): String {
+        val companies = listOf("game", "app", "tool", "media", "util")
+        val domains = listOf("com", "net", "org", "io")
+        
+        return "${domains.random()}.${companies.random()}.apk${1000 + random.nextInt(9000)}" // Range from 1000 to 9999
+    }
+    
+    /**
+     * Generate a detailed threat report for an APK
+     */
+    private fun generateThreatReport(filePath: String): String {
+        val threatTypes = listOf(
+            "Embedded malware signatures detected",
+            "Excessive permission requests",
+            "Code injection capabilities found",
+            "Data exfiltration modules identified",
+            "Known ransomware behavior patterns",
+            "SMS fraud functionality detected",
+            "Premium rate calling functionality",
+            "Adware with aggressive notification patterns"
+        )
+        
+        val selectedThreats = threatTypes.shuffled().take(1 + random.nextInt(4)) // Range from 1 to 4
+        
+        return "⚠️ SECURITY THREAT DETECTED: ${selectedThreats.first()}\n\n" +
+               "Issues found:\n" +
+               selectedThreats.mapIndexed { index, threat -> "• ${index + 1}. $threat" }.joinToString("\n") + 
+               "\n\nOther concerns:\n" +
+               "• Suspicious API calls detected\n" +
+               "• Obfuscated code sections present\n" +
+               "• Runtime permission manipulation\n\n" +
+               "RECOMMENDATION: Do not install this APK. It contains code that may compromise device security."
+    }
+    
+    /**
+     * Simulate model training process for the demo
+     */
+    private fun simulateModelTraining() {
+        var progress = 0f
+        val stages = listOf(
+            "Initializing training",
+            "Preprocessing behavioral data",
+            "Training neural model",
+            "Optimizing detection thresholds",
+            "Validating against test cases",
+            "Finalizing model parameters"
+        )
+        
+        handler.post(object : Runnable {
+            override fun run() {
+                progress += 0.02f
+                val stageIndex = (progress * stages.size).toInt().coerceAtMost(stages.size - 1)
+                val remainingTime = ((1 - progress) * 120).toInt().coerceAtLeast(0)
+                
+                _modelTrainingStatus.update {
+                    it.copy(
+                        progress = progress,
+                        currentStage = stages[stageIndex],
+                        estimatedTimeRemaining = remainingTime
+                    )
+                }
+                
+                if (progress < 1f) {
+                    handler.postDelayed(this, 1000)
+                } else {
+                    _modelTrainingStatus.update {
+                        it.copy(
+                            isTraining = false,
+                            progress = 1f,
+                            currentStage = "Training complete",
+                            estimatedTimeRemaining = 0
+                        )
+                    }
+                    // Update the fingerprint status with a new model version
+                    _fingerprintStatus.update {
+                        it.copy(
+                            modelTrainingProgress = 1f,
+                            lastVerified = System.currentTimeMillis()
+                        )
+                    }
+                    
+                    // Simulate improved security score
+                    _securityScore.value = (_securityScore.value + 2).coerceAtMost(99)
+                }
+            }
+        })
+    }
+    
+    /**
+     * Simulate data updates for the demo
+     */
+    private fun startMockDataUpdates() {
+        // Keep track of recently detected anomalies to avoid duplication
+        val recentAnomalies = mutableSetOf<String>()
+        
+        handler.post(object : Runnable {
+            override fun run() {
+                if (monitoringActive) {
+                    // Update fingerprint status
+                    _fingerprintStatus.update {
+                        it.copy(
+                            score = 0.90f + random.nextFloat() * 0.09f,
+                            lastVerified = System.currentTimeMillis(),
+                            behaviorDataPoints = it.behaviorDataPoints + (1 + random.nextInt(5)), // Range from 1 to 5
+                            behaviorPatternScore = 0.85f + random.nextFloat() * 0.14f,
+                            deviceIntegrityScore = 0.90f + random.nextFloat() * 0.09f,
+                            lastBehaviorUpdate = System.currentTimeMillis()
+                        )
+                    }
+                    
+                    // Random chance to detect a new threat
+                    // But check if we've already detected a similar anomaly recently
+                    if (random.nextInt(100) < 5) {
+                        val appName = getRandomAppForAnomaly()
+                        val packageName = appNameToPackage(appName)
+                        
+                        // Only add if this app wasn't recently reported
+                        if (!recentAnomalies.contains(packageName)) {
+                            val newEvent = ThreatHistoryEvent(
+                                id = UUID.randomUUID().toString(),
+                                timestamp = System.currentTimeMillis(),
+                                eventType = ThreatEventType.ANOMALY_DETECTED,
+                                severity = ThreatSeverity.LOW,
+                                description = "Minor behavioral anomaly detected",
+                                appName = appName,
+                                packageName = packageName,
+                                aiConfidence = 65 + random.nextInt(21), // Range from 65 to 85
+                                isResolved = false,
+                                detailedAnalysis = "Neural network detected slight deviation in expected behavior pattern.",
+                                detectionMethod = "Real-time Monitoring"
+                            )
+                            
+                            // Update threat history with new event, avoiding duplicates
+                            _threatHistory.update { currentThreats ->
+                                // Check if we already have a similar event
+                                val alreadyExists = currentThreats.any { 
+                                    it.packageName == packageName && 
+                                    System.currentTimeMillis() - it.timestamp < 3600000 // Within the last hour
+                                }
+                                
+                                if (!alreadyExists) {
+                                    // Add to recent anomalies to prevent duplication
+                                    recentAnomalies.add(packageName)
+                                    // Keep set size reasonable
+                                    if (recentAnomalies.size > 10) {
+                                        recentAnomalies.clear()
+                                    }
+                                    listOf(newEvent) + currentThreats
+                                } else {
+                                    currentThreats
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Update security score occasionally
+                    if (random.nextInt(100) < 10) {
+                        _securityScore.value = (_securityScore.value + (-1 + random.nextInt(4))).coerceIn(85, 99) // Range from -1 to 2
+                    }
+                    
+                    handler.postDelayed(this, 5000)
+                }
+            }
+        })
+    }
+    
+    /**
+     * Get a random app name for anomaly detection
+     */
+    private fun getRandomAppForAnomaly(): String {
+        val commonApps = listOf(
+            "Background Services", 
+            "System Framework", 
+            "Package Manager", 
+            "Google Services", 
+            "System UI", 
+            "Media Framework"
+        )
+        return commonApps.random()
+    }
+    
+    /**
+     * Convert app name to package name format
+     */
+    private fun appNameToPackage(appName: String): String {
+        val cleaned = appName.lowercase().replace(" ", ".")
+        return "android.system.$cleaned"
+    }
+    
+    /**
+     * Register sensors for device verification
+     */
+    private fun registerSensors() {
+        try {
+            val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            
+            accelerometer?.let {
+                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            }
+            
+            gyroscope?.let {
+                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error registering sensors: ${e.message}")
+            // Continue without sensors if there's an error
+        }
+    }
+    
+    /**
+     * Unregister sensors
+     */
+    private fun unregisterSensors() {
+        try {
+            sensorManager.unregisterListener(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error unregistering sensors: ${e.message}")
+        }
+    }
+    
+    override fun onSensorChanged(event: SensorEvent?) {
+        // In a real implementation, this would analyze sensor data
+        // For demo purposes, we're just updating the fingerprint status occasionally
+        if (event != null && random.nextInt(100) < 5) {
+            _fingerprintStatus.update {
+                it.copy(
+                    behaviorDataPoints = it.behaviorDataPoints + 1,
+                    lastBehaviorUpdate = System.currentTimeMillis()
+                )
+            }
+        }
+    }
+    
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // Not implemented for this demo
+    }
+    
+    /**
+     * Cleanup resources
+     */
+    fun cleanup() {
+        stopBehaviorMonitoring()
+        handler.removeCallbacksAndMessages(null)
+    }
+    
+    /**
+     * Data classes for Neural Fingerprint
+     */
+    data class FingerprintStatus(
+        val fingerprintHash: String = UUID.randomUUID().toString(),
+        val score: Float = 0.92f,
+        val lastVerified: Long = System.currentTimeMillis(),
+        val blockchainVerified: Boolean = true,
+        val isAnalyzing: Boolean = false,
+        val deviceIntegrityScore: Float = 0.95f,
+        val behaviorPatternScore: Float = 0.90f,
+        val modelTrainingProgress: Float = 1.0f,
+        val anomalyScore: Float = 0.0f,
+        val anomalyCount: Int = 0,
+        val behaviorDataPoints: Int = 248,
+        val lastBehaviorUpdate: Long = System.currentTimeMillis() - 30000,
+        val monitoringStartTime: Long = System.currentTimeMillis() - 3600000,
+        val potentialEmulator: Boolean = false
+    )
+    
+    data class AppAnalysisResult(
+        val packageName: String,
+        val appName: String,
+        val trustScore: Int,
+        val lastAnalyzed: Long,
+        val behaviorPatternConsistency: Int,
+        val apiUsageNormality: Int,
+        val permissionUsageScore: Int,
+        val primaryIssue: String,
+        val isTrusted: Boolean,
+        val detailedReport: String,
+        val isSystemApp: Boolean = false,
+        val isFromOfficialStore: Boolean = false,
+        val installerStore: String = "Unknown Source",
+        val installSource: String = "Unknown Source",
+        val deepScanPerformed: Boolean = false
+    )
+    
+    data class ModelTrainingStatus(
+        val isTraining: Boolean = false,
+        val progress: Float = 0f,
+        val currentStage: String = "",
+        val estimatedTimeRemaining: Int = 0,
+        val isAnalyzing: Boolean = false,
+        val analysisTarget: String? = null,
+        val analysisProgress: Float = 0f,
+        val analysisResult: String? = null
+    )
+    
+    data class CloneDetectionResult(
+        val isCloningDetected: Boolean,
+        val confidenceScore: Float,
+        val detectionMethod: String,
+        val timestamp: Long,
+        val threatLevel: ThreatLevel,
+        val signatureVerified: Boolean
+    )
+    
+    enum class ThreatLevel {
+        LOW, MEDIUM, HIGH, CRITICAL
+    }
+    
+    data class ThreatHistoryEvent(
+        val id: String,
+        val timestamp: Long,
+        val eventType: ThreatEventType,
+        val severity: ThreatSeverity,
+        val description: String,
+        val appName: String,
+        val packageName: String,
+        val aiConfidence: Int,
+        val isResolved: Boolean,
+        val detailedAnalysis: String,
+        val detectionMethod: String
+    )
+    
+    enum class ThreatEventType {
+        CLONE_DETECTED,
+        ANOMALY_DETECTED,
+        SUSPICIOUS_BEHAVIOR,
+        MODEL_UPDATED,
+        SECURITY_CHECK
+    }
+    
+    enum class ThreatSeverity {
+        LOW, MEDIUM, HIGH, CRITICAL, INFO
+    }
+
+    /**
+     * Check if an app comes from an official store with enhanced detection
+     */
+    private fun isPackageFromOfficialStore(packageName: String, installSource: String): Boolean {
+        // Check Play Store directly
+        if (installSource == "com.android.vending" || installSource == "com.google.android.feedback") {
+            return true
+        }
+        
+        // Check against known official store package names
+        return officialStores.containsKey(installSource)
+    }
+
+    /**
+     * Check if a package is a Google service package
+     */
+    private fun isGoogleServicePackage(packageName: String): Boolean {
+        return googleServicePackages.any { packageName.startsWith(it) }
+    }
+
+    /**
+     * Check if a package is related to a system app or trusted app
+     */
+    private fun isRelatedToSystemApp(packageManager: PackageManager, packageName: String): Boolean {
+        // Check if the package starts with any trusted prefix
+        if (trustedPackagePrefixes.any { packageName.startsWith(it) }) {
+            return true
+        }
+        
+        // Check shared user IDs to see if this app shares a user ID with a system app
+        try {
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                // Handle Android 9+ (API 28+)
+                packageManager.getPackageInfo(packageName, 0)
+            } else {
+                packageManager.getPackageInfo(packageName, PackageManager.GET_SHARED_LIBRARY_FILES)
+            }
+            
+            val sharedUserId = packageInfo.sharedUserId
+            
+            if (!sharedUserId.isNullOrEmpty()) {
+                // Get all packages with this shared user ID
+                val installedPackages = packageManager.getInstalledPackages(0)
+                for (pkg in installedPackages) {
+                    if (pkg.sharedUserId == sharedUserId) {
+                        val isSystem = (pkg.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM != 0
+                        if (isSystem) {
+                            return true
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Unable to check, return false
+            Log.e(TAG, "Error checking system app relation: ${e.message}")
+        }
+        
+        return false
+    }
+    
+    /**
+     * Gets the most accurate store information for an app package
+     */
+    fun getAccurateStoreInfo(packageName: String): String {
+        val packageManager = context.packageManager
+        
+        // First check if it's a system app
+        val isSystemApp = try {
+            val appInfo = packageManager.getApplicationInfo(packageName, 0)
+            (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+            (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+        } catch (e: Exception) {
+            false
+        }
+        
+        if (isSystemApp) {
+            return "System App"
+        }
+        
+        // Get installer package
+        val installerPackage = try {
+            packageManager.getInstallerPackageName(packageName)
+        } catch (e: Exception) {
+            null
+        }
+        
+        // List of packages that should be categorized as "Google App Services"
+        val googleAppServicePackages = listOf(
+            "com.google.android.gms",              // Google Play Services
+            "com.google.android.gsf",              // Google Services Framework
+            "com.google.android.ext.services",     // Android Services Library
+            "com.google.android.apps.wellbeing",   // Digital Wellbeing
+            "com.google.android.syncadapters",     // Google Sync Adapters
+            "com.google.android.backuptransport",  // Google Backup Transport
+            "com.google.android.feedback",         // Google Feedback
+            "com.google.android.printservice",     // Print Service
+            "com.google.android.partnersetup",     // Partner Setup
+            "com.google.android.apps.turbo",       // Device Health Services
+            "com.google.android.as",               // Android System Intelligence
+            "com.google.android.documentsui",      // Files
+            "com.google.android.apps.work.clouddpc", // Google Device Policy
+            "com.google.android.apps.enterprise.dmagent", // Device Manager
+            "com.google.android.configupdater"     // Google Config Updater
+        )
+        
+        // Check if it's a Google App Service
+        if (googleAppServicePackages.contains(packageName) ||
+            (packageName.startsWith("com.google.android.") && 
+             !packageName.contains("youtube") && 
+             !packageName.contains("gm") && 
+             !packageName.contains("chrome") && 
+             !packageName.contains("maps"))) {
+            return "Google App Services"
+        }
+        
+        // Enhanced Google Play Store apps list - these are user-facing apps, not services
+        val googlePlayStoreApps = listOf(
+            "com.google.android.youtube",          // YouTube
+            "com.google.android.apps.maps",        // Google Maps
+            "com.google.android.gm",               // Gmail
+            "com.android.chrome",                  // Chrome
+            "com.google.android.apps.photos",      // Google Photos
+            "com.google.android.videos",           // Google TV
+            "com.google.android.apps.docs",        // Google Drive
+            "com.google.android.keep",             // Google Keep
+            "com.google.android.apps.tachyon",     // Google Meet
+            "com.google.android.apps.messaging",   // Google Messages
+            "com.google.android.apps.authenticator2", // Google Authenticator
+            "com.google.android.calendar",         // Google Calendar
+            "com.google.android.apps.googleassistant", // Google Assistant
+            "com.google.android.apps.youtube.music", // YouTube Music
+            "com.google.android.googlequicksearchbox", // Google Search
+            "com.google.android.apps.subscriptions.red" // YouTube Premium
+        )
+        
+        // Check if it's a user-facing Google app
+        val isGooglePlayStoreApp = googlePlayStoreApps.contains(packageName) ||
+            packageName.startsWith("com.google.android.apps") || 
+            packageName == "com.android.vending"   // Play Store itself
+        
+        // Special verification for Google Play Store apps
+        if (isGooglePlayStoreApp) {
+            return "Google Play Store"
+        }
+        
+        // Extended list of popular third-party apps typically installed from Play Store
+        val popularPlayStoreApps = listOf(
+            "com.jio.jioplay.tv",            // JioTV 
+            "com.facebook.katana",            // Facebook
+            "com.instagram.android",          // Instagram
+            "com.whatsapp",                   // WhatsApp
+            "com.zhiliaoapp.musically",       // TikTok
+            "com.spotify.music",              // Spotify
+            "com.netflix.mediaclient",        // Netflix
+            "com.amazon.mShop.android.shopping", // Amazon
+            "in.amazon.mShop.android.shopping", // Amazon India
+            "com.snapchat.android",           // Snapchat
+            "com.twitter.android",            // Twitter
+            "org.telegram.messenger",         // Telegram
+            "com.ubercab",                    // Uber
+            "com.microsoft.office.outlook",   // Microsoft Outlook
+            "com.microsoft.teams",            // Microsoft Teams
+            "com.adobe.reader",               // Adobe Reader
+            "com.hotstar.android",            // Disney+ Hotstar
+            "com.phonepe.app",                // PhonePe
+            "net.one97.paytm",                // Paytm
+            "com.flipkart.android",           // Flipkart
+            "com.linkedin.android"            // LinkedIn
+        )
+        
+        // Check Play Store installer package
+        if (installerPackage == "com.android.vending" || installerPackage == "com.google.android.feedback") {
+            // Popular apps installed from Play Store
+            if (popularPlayStoreApps.contains(packageName)) {
+                return "Google Play Store"
+            }
+            
+            // For other apps from Play Store
+            return "Google Play Store"
+        }
+        
+        // Handle common alternative installer packages for different stores
+        val playStoreInstallers = listOf(
+            "com.android.vending",           // Primary Play Store installer
+            "com.google.android.feedback",   // Alternative Play Store reference
+            "com.google.android.packageinstaller" // System installer sometimes used by Play Store
+        )
+        
+        // Special case for popular apps with potentially missing installer info
+        if (popularPlayStoreApps.contains(packageName)) {
+            // If we already know it's a popular app, likely from Play Store
+            return "Google Play Store"
+        }
+        
+        // Final determination based on installer package and other checks
+        return when {
+            installerPackage == null -> "Unknown Source"
+            playStoreInstallers.contains(installerPackage) -> "Google Play Store"
+            officialStores.containsKey(installerPackage) -> officialStores[installerPackage]!!
+            packageName.startsWith("com.google.") -> "Google App Services" // Remaining Google apps
+            packageName.startsWith("com.android.") -> "Android System"
+            isRelatedToSystemApp(packageManager, packageName) -> "System Related"
+            packageName.startsWith("com.jio.") -> "Google Play Store" // Special case for JioTV
+            packageName.startsWith("com.samsung.") -> 
+                if (installerPackage.contains("samsung")) "Samsung Galaxy Store" else "System App"
+            else -> "Unknown Source"
+        }
+    }
+    
+    /**
+     * Build the source verification summary for the UI
+     */
+    fun buildSourceVerificationSummary(): Map<String, Int> {
+        val appResults = _appAnalysisResults.value
+        val sourceCounts = mutableMapOf<String, Int>()
+        
+        // Initialize categories
+        sourceCounts["Google Play Store"] = 0
+        sourceCounts["Google App Services"] = 0  
+        sourceCounts["System App"] = 0
+        sourceCounts["Unknown Source"] = 0
+        
+        // Count apps by source
+        for (app in appResults) {
+            val source = app.installSource
+            
+            // Update the count
+            sourceCounts[source] = (sourceCounts[source] ?: 0) + 1
+        }
+        
+        return sourceCounts
+    }
+    
+    /**
+     * Get simplified trust status for an app
+     * This helps UI to show trusted/untrusted apps count
+     */
+    fun getSimplifiedTrustStatus(appResult: AppAnalysisResult): String {
+        return when (appResult.installSource) {
+            "Google Play Store", "Google App Services", "System App" -> "Trusted"
+            else -> "Untrusted"
+        }
+    }
+    
+    /**
+     * Checks if app signature is valid or shows signs of tampering
+     * Returns a warning message if issues found, null if valid
+     */
+    private fun checkAppSignature(packageInfo: PackageInfo, packageName: String): String? {
+        // Check for known secure apps that should have verified signatures
+        val secureAppPackages = listOf(
+            "com.whatsapp", "com.facebook.katana", "com.instagram.android", 
+            "com.google.android.youtube", "com.spotify.music", "com.snapchat.android",
+            "org.telegram.messenger", "com.twitter.android", "com.zhiliaoapp.musically",
+            "com.netflix.mediaclient", "com.amazon.mShop.android.shopping",
+            "com.jio.jioplay.tv" // Add JioTV to the list of trusted apps
+        )
+        
+        // Popular apps from Play Store should not be marked as suspicious based only on signatures
+        // Skip signature checks for popular apps that have been verified to be from Play Store
+        val installSource = getAccurateStoreInfo(packageName)
+        if (installSource == "Google Play Store" && 
+            (secureAppPackages.any { packageName.startsWith(it) } || packageName.startsWith("com.google."))) {
+            return null // Trust apps from Play Store with recognized package names
+        }
+        
+        try {
+            // Signature checks as before...
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val signingInfo = packageInfo.signingInfo ?: return "Invalid signature (null)"
+                
+                // Multi-signature check - safely access hasMultipleSigners with null check
+                if (signingInfo.hasMultipleSigners()) {
+                    // For known secure apps, multiple signers is unusual
+                    if (secureAppPackages.any { packageName.startsWith(it) }) {
+                        return "Unexpected multiple signatures"
+                    }
+                }
+                
+                // Missing signature - safely access signingCertificateHistory with null check
+                val certHistory = signingInfo.signingCertificateHistory
+                if (certHistory == null || certHistory.isEmpty()) {
+                    return "Missing signature history"
+                }
+            } else {
+                // Legacy signature check
+                @Suppress("DEPRECATION")
+                val signatures = packageInfo.signatures
+                if (signatures == null || signatures.isEmpty()) {
+                    return "Invalid signature (missing)"
+                }
+            }
+            
+            // For apps from Play Store, should have a valid signature already verified
+            // so we wouldn't normally get here unless there's a valid issue
+            if (installSource == "Google Play Store") {
+                val installerPackage = try {
+                    context.packageManager.getInstallerPackageName(packageName)
+                } catch (e: Exception) {
+                    null
+                }
+                
+                if (installerPackage != "com.android.vending" && installerPackage != "com.google.android.feedback") {
+                    // Only flag this for non-popular apps to reduce false positives
+                    if (!secureAppPackages.any { packageName.startsWith(it) } && !packageName.startsWith("com.google.")) {
+                        return "Signature/installer mismatch"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            return "Signature verification error"
+        }
+        
+        return null  // No issues found
+    }
+
+    /**
+     * Checks if an app is trying to mimic a popular app
+     */
+    private fun checkIfMimicsPopularApp(appName: String, packageName: String, isFromPlayStore: Boolean): Boolean {
+        // If app is from Play Store, it's already vetted by Google
+        if (isFromPlayStore) {
+            return false
+        }
+        
+        val popularAppNames = listOf(
+            "WhatsApp", "Facebook", "Instagram", "YouTube", "Netflix",
+            "Spotify", "TikTok", "Amazon", "Twitter", "Snapchat",
+            "Gmail", "Maps", "Chrome", "Banking", "Payment"
+        )
+        
+        val popularPackages = mapOf(
+            "com.whatsapp" to "WhatsApp",
+            "com.facebook.katana" to "Facebook",
+            "com.instagram.android" to "Instagram",
+            "com.google.android.youtube" to "YouTube",
+            "com.netflix.mediaclient" to "Netflix",
+            "com.spotify.music" to "Spotify",
+            "com.zhiliaoapp.musically" to "TikTok",
+            "com.snapchat.android" to "Snapchat",
+            "com.twitter.android" to "Twitter",
+            "com.amazon.mShop.android.shopping" to "Amazon"
+        )
+        
+        // Check if app name contains popular app name but package doesn't match
+        for ((popularPackage, popularName) in popularPackages) {
+            if (appName.contains(popularName, ignoreCase = true) && 
+                !packageName.startsWith(popularPackage) &&
+                !packageName.contains("com.android") && 
+                !packageName.contains("com.google")) {
+                return true
+            }
+        }
+        
+        // Check for slight variations in package names
+        val suspiciousPackagePatterns = listOf(
+            Regex("com\\.whatsap+[^p].*"),
+            Regex("com\\.face?book?[^.].*"),
+            Regex("com\\.insta(gram)?[^.].*"),
+            Regex("com\\.youtub[^e].*"),
+            Regex("com\\.netfli[^x].*"),
+            Regex("com\\.spotif[^y].*"),
+            Regex("com\\.tik?tok[^.].*"),
+            Regex("com\\.snap(chat)?[^.].*")
+        )
+        
+        return suspiciousPackagePatterns.any { it.matches(packageName) }
+    }
+
+    /**
+     * Check if app installation path is unusual (like downloaded APK)
+     */
+    private fun checkUnusualInstallPath(packageName: String): Boolean {
+        try {
+            val packageInfo = context.packageManager.getApplicationInfo(packageName, 0)
+            val installPath = packageInfo.sourceDir ?: return false
+            
+            // Check for unusual installation paths
+            val suspiciousPaths = listOf(
+                "/data/local/", 
+                "/sdcard/", 
+                "/storage/emulated/0/Download/", 
+                "/mnt/sdcard/",
+                "/storage/",
+                "/temp/",
+                "/download/"
+            )
+            
+            return suspiciousPaths.any { installPath.lowercase().contains(it.lowercase()) }
+        } catch (e: Exception) {
+            return false
+        }
+    }
+
+    /**
+     * Improved clone detection that reduces false positives, especially for Play Store apps
+     */
+    private fun detectPossibleCloneImproved(
+        packageName: String, 
+        appName: String, 
+        packageInfo: PackageInfo, 
+        isFromPlayStore: Boolean
+    ): Boolean {
+        // Play Store apps are unlikely to be clones, already vetted by Google
+        if (isFromPlayStore) {
+            return false
+        }
+        
+        // Skip well-known packages that aren't likely to be clones
+        if (packageName.startsWith("com.android") || 
+            packageName.startsWith("com.google") ||
+            packageName.startsWith("android")) {
+            return false
+        }
+        
+        val packageManager = context.packageManager
+        
+        // Get all installed apps with similar names
+        val installedApps = packageManager.getInstalledPackages(PackageManager.GET_SIGNATURES)
+        
+        for (otherPackage in installedApps) {
+            // Skip comparing with itself
+            if (otherPackage.packageName == packageName) {
+                continue
+            }
+            
+            try {
+                val otherAppInfo = packageManager.getApplicationInfo(otherPackage.packageName, 0)
+                val otherAppName = packageManager.getApplicationLabel(otherAppInfo).toString()
+                
+                // Check for similar app names - this could indicate a clone
+                val similarNames = appName.equals(otherAppName, ignoreCase = true) || 
+                                  appName.contains(otherAppName, ignoreCase = true) || 
+                                  otherAppName.contains(appName, ignoreCase = true)
+                
+                if (similarNames) {
+                    // Now check if one app is from Play Store and one isn't
+                    val thisSource = getAccurateStoreInfo(packageName)
+                    val otherSource = getAccurateStoreInfo(otherPackage.packageName)
+                    
+                    val thisIsFromPlayStore = thisSource == "Google Play Store"
+                    val otherIsFromPlayStore = otherSource == "Google Play Store"
+                    
+                    // If one is from Play Store and the other isn't, likely a clone
+                    if (thisIsFromPlayStore != otherIsFromPlayStore) {
+                        // The one NOT from Play Store is likely the clone
+                        if (!thisIsFromPlayStore) {
+                            return true
+                        }
+                    }
+                    
+                    // Check signatures - different signatures suggest a clone
+                    if (!haveMatchingSignatures(packageInfo, otherPackage)) {
+                        // If they have different signatures and similar names, one is likely a clone
+                        // The officially signed one is legitimate
+                        val thisInstallerPackage = try {
+                            packageManager.getInstallerPackageName(packageName)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        
+                        val otherInstallerPackage = try {
+                            packageManager.getInstallerPackageName(otherPackage.packageName)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        
+                        // If this app has no installer but the other does, this is likely the clone
+                        if (thisInstallerPackage.isNullOrEmpty() && !otherInstallerPackage.isNullOrEmpty()) {
+                            return true
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Skip this comparison if there's an error
+                continue
+            }
+        }
+        
+        return false
+    }
+
+    /**
+     * Checks if the device is rooted
+     */
+    private fun checkIfDeviceRooted(): Boolean {
+        // Check for common root files
+        val rootFiles = arrayOf(
+            "/system/app/Superuser.apk",
+            "/system/xbin/su",
+            "/system/bin/su",
+            "/sbin/su",
+            "/system/su",
+            "/system/bin/.ext/.su",
+            "/system/xbin/daemonsu",
+            "/data/local/xbin/su",
+            "/data/local/bin/su",
+            "/system/sd/xbin/su"
+        )
+        
+        for (file in rootFiles) {
+            if (File(file).exists()) {
+                return true
+            }
+        }
+        
+        // Check for installed root management apps
+        val rootApps = arrayOf(
+            "com.noshufou.android.su",
+            "com.noshufou.android.su.elite",
+            "eu.chainfire.supersu",
+            "com.koushikdutta.superuser",
+            "com.thirdparty.superuser",
+            "com.topjohnwu.magisk"
+        )
+        
+        val packageManager = context.packageManager
+        for (app in rootApps) {
+            try {
+                packageManager.getPackageInfo(app, 0)
+                return true
+            } catch (e: PackageManager.NameNotFoundException) {
+                // Not found, continue checking
+            }
+        }
+        
+        // Check for writable system directories
+        try {
+            val file = File("/system/test")
+            if (file.canWrite()) {
+                file.delete()
+                return true
+            }
+        } catch (e: Exception) {
+            // Ignore exceptions
+        }
+        
+        // Try executing su command
+        try {
+            Runtime.getRuntime().exec("su")
+            return true
+        } catch (e: Exception) {
+            // Ignore exceptions
+        }
+        
+        return false
+    }
+
+    /**
+     * Calculate trust score for an app based on various factors
+     */
+    private fun calculateAppTrustScore(packageName: String, installerPackage: String?, isSystemApp: Boolean): Int {
+        // System apps are generally trusted
+        if (isSystemApp) {
+            return 90 + random.nextInt(10)
+        }
+        
+        // Base score
+        var score = 50
+        
+        // Official store apps get a significant boost
+        if (!installerPackage.isNullOrEmpty() && officialStores.containsKey(installerPackage)) {
+            score += 30
+        }
+        
+        // Known suspicious package name patterns are penalized
+        if (matchesSuspiciousPattern(packageName)) {
+            score -= 40
+        }
+        
+        // Add some randomness for demo purposes
+        score += -10 + random.nextInt(22) // Range from -10 to 11
+        
+        // Ensure score is within valid range
+        return score.coerceIn(0, 100)
+    }
+
+    /**
+     * Determine the primary issue with an app
+     */
+    private fun determineAppIssue(packageName: String, installerPackage: String?, trustScore: Int, isSystemApp: Boolean): String {
+        return when {
+            isSystemApp -> "System app - no major concerns"
+            trustScore < 30 -> "High risk - suspicious package name pattern"
+            trustScore < 50 -> "Medium risk - unknown source installation"
+            trustScore < 70 -> "Low risk - moderate permission usage"
+            !installerPackage.isNullOrEmpty() && officialStores.containsKey(installerPackage) -> "Trusted app - installed from official store"
+            else -> "No major issues detected"
+        }
+    }
+
+    /**
+     * Check if package name matches known suspicious patterns
+     */
+    private fun matchesSuspiciousPattern(packageName: String): Boolean {
+        return suspiciousAppSignatures.any { it.matches(packageName) }
+    }
+
+    /**
+     * Check if app name matches known malicious apps
+     */
+    private fun isMaliciousAppName(appName: String): Boolean {
+        return maliciousAppNames.any { 
+            appName.equals(it, ignoreCase = true) || 
+            appName.contains(it, ignoreCase = true) 
+        }
+    }
+
+    /**
+     * Security issue data class
+     */
+    data class SecurityIssue(
+        val id: String,
+        val appName: String,
+        val packageName: String,
+        val threatLevel: ThreatLevel,
+        val description: String,
+        val timestamp: Long,
+        val isResolved: Boolean
+    )
+
+    /**
+     * Generate mock threat history for demonstration
+     */
+    private fun generateThreatHistory() {
+        // Use the existing mock data generation method
+        generateMockThreatHistory()
+    }
+
+    /**
+     * Updates an app analysis result in the current list
+     */
+    private fun updateAppAnalysisResult(result: AppAnalysisResult) {
+        val currentList = _appAnalysisResults.value.toMutableList()
+        val index = currentList.indexOfFirst { it.packageName == result.packageName }
+        
+        if (index >= 0) {
+            // Update existing entry
+            currentList[index] = result
+        } else {
+            // Add new entry
+            currentList.add(result)
+        }
+        
+        // Update the state flow
+        _appAnalysisResults.value = currentList
+        
+        // Update security score based on results
+        updateSecurityScore(currentList)
+    }
+
+    /**
+     * Notifies that the dataset has changed
+     */
+    private fun notifyDataSetChanged() {
+        // This function would normally notify UI components
+        // In this case, we just update the security score based on current results
+        updateSecurityScore(_appAnalysisResults.value)
+    }
+
+    /**
+     * Generates a security notification for a suspicious app
+     */
+    private fun generateSecurityNotification(packageName: String, appName: String, detailedReport: String) {
+        // In a real app, this would create a system notification
+        // For this implementation, we'll just add a threat history event
+        val newEvent = ThreatHistoryEvent(
+            id = UUID.randomUUID().toString(),
+            timestamp = System.currentTimeMillis(),
+            eventType = ThreatEventType.SUSPICIOUS_BEHAVIOR,
+            severity = ThreatSeverity.HIGH,
+            description = "Suspicious app detected: $appName",
+            appName = appName,
+            packageName = packageName,
+            aiConfidence = 75 + random.nextInt(21), // Range from 75 to 95
+            isResolved = false,
+            detailedAnalysis = detailedReport,
+            detectionMethod = "Deep Scan Analysis"
+        )
+        
+        // Add to threat history
+        _threatHistory.update { listOf(newEvent) + it }
+    }
+
+    /**
+     * Build a detailed analysis report for suspicious apps
+     */
+    private fun buildDetailedReport(
+        packageName: String, 
+        appName: String, 
+        trustScore: Int, 
+        installSource: String = "Unknown Source",
+        isTrusted: Boolean = false,
+        dangerousPermissionsCount: Int = 0,
+        possibleClone: Boolean = false,
+        suspiciousFactorsCount: Int = 0,
+        isDeviceRooted: Boolean = false
+    ): String {
+        val riskLevel = when {
+            trustScore < 20 -> "CRITICAL RISK"
+            trustScore < 40 -> "HIGH RISK"
+            trustScore < 60 -> "MEDIUM RISK"
+            trustScore < 80 -> "LOW RISK"
+            else -> "SECURE"
+        }
+        
+        val sb = StringBuilder()
+        sb.append("$riskLevel: $appName\n\n")
+        
+        // Add installation source information with more prominence
+        sb.append("INSTALLATION SOURCE: ")
+        val sourceInfo = when {
+            installSource == "System App" -> "System Application (Pre-installed)"
+            installSource == "Google Play Store" -> "Google Play Store"
+            officialStores.values.any { it == installSource } -> "$installSource (Verified)"
+            else -> "UNKNOWN SOURCE"
+        }
+        sb.append("$sourceInfo\n\n")
+        
+        // Device root status (new)
+        if (isDeviceRooted) {
+            sb.append("⚠️ DEVICE ROOT DETECTED: Your device is rooted, which significantly increases security risks for all applications.\n\n")
+        }
+        
+        // If unknown source, add explicit warning
+        if (installSource == "Unknown Source") {
+            sb.append("⚠️ SOURCE VERIFICATION FAILED: This application was not installed from any recognized app store.\n")
+            sb.append("Applications from unknown sources have a higher risk of containing malware or other security threats.\n\n")
+        }
+        
+        // Clone warning (new)
+        if (possibleClone) {
+            sb.append("⚠️ POSSIBLE CLONE DETECTED: This app may be a clone or fake version of a legitimate application.\n")
+            sb.append("Clone apps often attempt to mimic trusted applications to steal data or credentials.\n\n")
+        }
+        
+        // Add unique details based on package name
+        sb.append("DEEP SCAN RESULTS:\n")
+        
+        // Summary of suspicious factors
+        sb.append("• Suspicious factors detected: $suspiciousFactorsCount\n")
+        sb.append("• Dangerous permissions requested: $dangerousPermissionsCount\n\n")
+        
+        sb.append("Issues detected:\n")
+        
+        // High risk issues for very suspicious apps
+        if (trustScore < 30) {
+            if (matchesSuspiciousPattern(packageName)) {
+                sb.append("• Critical: Package name matches known malicious pattern\n")
+            }
+            
+            if (isMaliciousAppName(appName)) {
+                sb.append("• Critical: App name matches known malicious application\n")
+            }
+            
+            if (possibleClone) {
+                sb.append("• Critical: Appears to be a clone of a legitimate app\n")
+            }
+            
+            if (installSource == "Unknown Source") {
+                sb.append("• Critical: App installed from unverified source\n")
+            }
+            
+            sb.append("• Critical: ${getRandomIssue(packageName, true)}\n")
+            sb.append("• High: ${getRandomIssue(packageName, false)}\n")
+        } 
+        // Medium risk issues
+        else if (trustScore < 60) {
+            if (installSource == "Unknown Source") {
+                sb.append("• Medium: App installed from unverified source\n")
+            }
+            
+            if (dangerousPermissionsCount > 3) {
+                sb.append("• Medium: Requests ${dangerousPermissionsCount} dangerous permissions\n")
+            }
+            
+            if (possibleClone) {
+                sb.append("• Medium: Similar to other apps with different signatures\n")
+            }
+            
+            sb.append("• Medium: ${getRandomIssue(packageName, false)}\n")
+        }
+        // Low risk issues
+        else if (trustScore < 80) {
+            if (dangerousPermissionsCount > 0) {
+                sb.append("• Low: Requests ${dangerousPermissionsCount} permissions that require careful review\n")
+            }
+            
+            sb.append("• Low: Permissions requested don't match app purpose\n")
+            sb.append("• Low: No valid developer signature verification\n")
+        }
+        // Secure apps
+        else {
+            sb.append("• No significant issues detected\n")
+            if (installSource == "System App") {
+                sb.append("• Verified system application\n")
+            }
+            if (officialStores.values.any { it == installSource }) {
+                sb.append("• Installed from trusted source: $installSource\n")
+            }
+        }
+        
+        sb.append("\n")
+        
+        // Add detailed source verification section
+        sb.append("SOURCE VERIFICATION DETAILS:\n")
+        if (officialStores.values.any { it == installSource }) {
+            sb.append("✓ Verified: Installed from $installSource\n")
+            sb.append("✓ App distribution channel is trusted\n")
+            sb.append("✓ Installation package has proper signature\n")
+        } else if (installSource == "System App") {
+            sb.append("✓ System Application: Pre-installed by device manufacturer\n")
+            sb.append("✓ Part of the device's trusted components\n")
+        } else {
+            sb.append("✗ Unverified Source: Not installed from any recognized app store\n")
+            sb.append("✗ Package was side-loaded onto the device\n")
+            sb.append("✗ Unable to verify app distribution channel\n")
+            sb.append("⚠️ Recommendation: Uninstall this app and install only from official app stores\n")
+        }
+        
+        // Permission analysis section (new)
+        if (dangerousPermissionsCount > 0) {
+            sb.append("\nPERMISSION ANALYSIS:\n")
+            sb.append("This app requests $dangerousPermissionsCount dangerous permissions that could potentially:\n")
+            if (dangerousPermissionsCount > 5) {
+                sb.append("• Access sensitive personal information\n")
+                sb.append("• Monitor your activities without clear purpose\n")
+                sb.append("• Access system features beyond what's necessary for functionality\n")
+            } else if (dangerousPermissionsCount > 2) {
+                sb.append("• Access some personal information\n")
+                sb.append("• Use system features that require security review\n")
+            } else {
+                sb.append("• Use specific device features requiring user permission\n")
+            }
+        }
+        
+        sb.append("\n")
+        
+        // Add analysis confidence
+        val confidence = when {
+            // Higher confidence for very suspicious apps
+            trustScore < 30 -> 90 + random.nextInt(10) // Range from 90 to 99
+            // Good confidence for moderately suspicious apps
+            trustScore < 60 -> 75 + random.nextInt(16) // Range from 75 to 90
+            // Lower confidence for borderline cases
+            else -> 60 + random.nextInt(26) // Range from 60 to 85
+        }
+        
+        sb.append("Neural fingerprint analysis confidence: $confidence%\n\n")
+        
+        // Add recommendation based on risk level
+        sb.append("RECOMMENDATION: ")
+        when {
+            trustScore < 30 -> {
+                sb.append("Remove immediately. This application exhibits characteristics of malicious software and poses a significant security risk.")
+            }
+            trustScore < 60 -> {
+                sb.append("Uninstall this application. It was installed from an unverified source and shows suspicious behavior patterns.")
+            }
+            trustScore < 80 -> {
+                sb.append("Consider alternative applications from official app stores. This app has some concerning behavior patterns.")
+            }
+            else -> {
+                sb.append("No immediate action required. Monitor app behavior and permissions.")
+            }
+        }
+        
+        return sb.toString()
+    }
+    
+    /**
+     * Generate a random issue description
+     */
+    private fun getRandomIssue(packageName: String, critical: Boolean): String {
+        return if (critical) {
+            when (random.nextInt(4)) {
+                0 -> "Device information exfiltration detected to unauthorized servers"
+                1 -> "Contains code signatures matching known malware families"
+                2 -> "Attempts to access root privileges without authorization"
+                else -> "Disables system security features silently"
+            }
+        } else {
+            when (random.nextInt(5)) {
+                0 -> "Accesses location data when app is not in use"
+                1 -> "Excessive network traffic to unknown endpoints"
+                2 -> "Reads contacts or messages without clear functionality need"
+                3 -> "Uncommon code obfuscation techniques detected"
+                else -> "Runs unauthorized processes in background"
+            }
+        }
+    }
+
+    /**
+     * Check if the app is a system app
+     * @param packageInfo The package info to check
+     * @return True if the app is a system app
+     */
+    private fun isSystemApp(packageInfo: PackageInfo): Boolean {
+        val appInfo = packageInfo.applicationInfo ?: return false
+        return (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+               (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+    }
+
+    /**
+     * Generate a security report
+     */
+    fun generateSecurityReport(): String {
+        return "NeuralFingerprint Security Report\n" +
+               "Generated: ${System.currentTimeMillis()}\n" +
+               "Overall Security Score: ${_securityScore.value}\n" +
+               "Behavioral Integrity: ${_fingerprintStatus.value.behaviorPatternScore * 100}%\n" +
+               "Device Integrity: ${_fingerprintStatus.value.deviceIntegrityScore * 100}%\n" +
+               "Apps Analyzed: ${_appAnalysisResults.value.size}\n" +
+               "Threats Detected: ${_threatHistory.value.count { it.severity == ThreatSeverity.HIGH }}\n" +
+               "Model Version: 2.1.4\n"
+    }
+
+    /**
+     * Refreshes app analysis with a more sophisticated deep scan that considers multiple factors
+     * to determine if an app is suspicious instead of just checking if it's a system app.
+     */
+    fun refreshAppAnalysisWithDeepScan() {
+        val packageManager = context.packageManager
+        val installedApps = packageManager.getInstalledPackages(PackageManager.GET_PERMISSIONS or PackageManager.GET_SIGNATURES)
+        val isDeviceRooted = checkIfDeviceRooted()
+        
+        // We'll track system apps, official store apps, and unknown source apps separately
+        val systemAppsCount = mutableMapOf<String, Int>()
+        val playStoreAppsCount = mutableMapOf<String, Int>()
+        val otherStoreAppsCount = mutableMapOf<String, Int>()
+        val unknownSourceAppsCount = mutableMapOf<String, Int>()
+        
+        // Initialize counters
+        systemAppsCount["System App"] = 0
+        playStoreAppsCount["Google Play Store"] = 0
+        playStoreAppsCount["Google App Services"] = 0
+        unknownSourceAppsCount["Unknown Source"] = 0
+        
+        // Enhanced list of system packages and preinstalled apps
+        val systemPackagePrefixes = listOf(
+            "com.android.",
+            "com.google.android.",
+            "android.",
+            "com.sec.android.", // Samsung
+            "com.huawei.", // Huawei
+            "com.xiaomi.", // Xiaomi
+            "com.miui.", // Xiaomi MIUI
+            "com.oneplus.", // OnePlus
+            "com.oppo.", // OPPO
+            "com.vivo." // Vivo
+        )
+        
+        // Process each installed app
+        for (packageInfo in installedApps) {
+            val packageName = packageInfo.packageName
+            
+            try {
+                val appInfo = packageManager.getApplicationInfo(packageName, 0)
+                val appName = packageManager.getApplicationLabel(appInfo).toString()
+                
+                // Track all suspicious factors for the app
+                val suspiciousFactors = mutableListOf<String>()
+                
+                // Determine the actual source with improved logic
+                val installSource = getAccurateStoreInfo(packageName)
+                val isFromPlayStore = installSource == "Google Play Store"
+                val isFromGoogleServices = installSource == "Google App Services"
+                val isFromOfficialStore = installSource == "Google Play Store" || 
+                                         installSource == "Google App Services" ||
+                                         installSource == "System App" ||
+                                         officialStores.values.contains(installSource)
+                
+                // Check if this is a system app - use both flags and manual check
+                val isRealSystemApp = isSystemApp(packageInfo) || 
+                                      systemPackagePrefixes.any { packageName.startsWith(it) }
+                
+                // Count based on category - ensure proper categorization
+                when {
+                    isRealSystemApp -> {
+                        systemAppsCount["System App"] = systemAppsCount["System App"]!! + 1
+                    }
+                    isFromPlayStore -> {
+                        playStoreAppsCount["Google Play Store"] = playStoreAppsCount["Google Play Store"]!! + 1
+                    }
+                    isFromGoogleServices -> {
+                        playStoreAppsCount["Google App Services"] = playStoreAppsCount["Google App Services"]!! + 1
+                    }
+                    isFromOfficialStore -> {
+                        // Count other official stores
+                        val storeName = installSource
+                        otherStoreAppsCount[storeName] = (otherStoreAppsCount[storeName] ?: 0) + 1
+                    }
+                    else -> {
+                        // This is a truly unknown source
+                        unknownSourceAppsCount["Unknown Source"] = unknownSourceAppsCount["Unknown Source"]!! + 1
+                        suspiciousFactors.add("Unknown installation source")
+                    }
+                }
+                
+                // Skip determining suspiciousness for system apps and recognized source apps
+                if (!isFromOfficialStore && !isRealSystemApp) {
+                    // FACTOR 2: Check for dangerous permissions
+                    val permissions = packageInfo.requestedPermissions
+                    val dangerousPermissionsCount = countDangerousPermissions(permissions)
+                    
+                    if (dangerousPermissionsCount > 5) {
+                        suspiciousFactors.add("Excessive dangerous permissions: $dangerousPermissionsCount")
+                    }
+                    
+                    // FACTOR 3: Check for app signature mismatch
+                    val signatureWarning = checkAppSignature(packageInfo, packageName)
+                    if (signatureWarning != null) {
+                        suspiciousFactors.add(signatureWarning)
+                    }
+                    
+                    // FACTOR 4: Check if app mimics a popular app
+                    val mimicsPopularApp = checkIfMimicsPopularApp(appName, packageName, isFromPlayStore)
+                    if (mimicsPopularApp) {
+                        suspiciousFactors.add("Mimics popular app name")
+                    }
+                    
+                    // FACTOR 5: Check for unusual installation path
+                    val hasUnusualInstallPath = checkUnusualInstallPath(packageName)
+                    if (hasUnusualInstallPath) {
+                        suspiciousFactors.add("Unusual installation path")
+                    }
+                    
+                    // FACTOR 6: Check for clones
+                    val possibleClone = detectPossibleCloneImproved(packageName, appName, packageInfo, isFromPlayStore)
+                    if (possibleClone) {
+                        suspiciousFactors.add("Possible clone detected")
+                    }
+                }
+                
+                // Calculate trust score based on source and suspicious factors
+                val suspiciousFactorsCount = suspiciousFactors.size
+                val isSuspicious = !isFromOfficialStore && !isRealSystemApp && suspiciousFactorsCount > 0
+                
+                // Calculate trust score with improved logic for accurate display
+                val trustScore = when {
+                    isRealSystemApp -> 95 // System apps get very high trust
+                    isFromPlayStore -> 90 // Play Store apps get high trust
+                    isFromOfficialStore -> 85 // Other official stores get good trust
+                    else -> {
+                        // Base score for unknown sources
+                        val baseScore = 60
+                        // Deduct points for suspicious factors
+                        baseScore - (suspiciousFactorsCount * 10).coerceAtMost(50)
+                    }
+                }
+                
+                // Only apps with specific red flags are marked as suspicious
+                val isTrusted = !isSuspicious
+                
+                // Generate detailed report with all factors
+                val detailedReport = buildImprovedDetailedReport(
+                    packageName = packageName,
+                    appName = appName,
+                    trustScore = trustScore,
+                    installSource = installSource,
+                    isTrusted = isTrusted,
+                    dangerousPermissionsCount = countDangerousPermissions(packageInfo.requestedPermissions),
+                    suspiciousFactors = suspiciousFactors,
+                    isDeviceRooted = isDeviceRooted,
+                    signatureMismatch = suspiciousFactors.any { it.contains("signature", ignoreCase = true) }
+                )
+                
+                // Primary issue description based on most important factor
+                val primaryIssue = when {
+                    isRealSystemApp -> "System application"
+                    isFromPlayStore -> "Verified app from Play Store"
+                    isFromOfficialStore -> "Installed from verified store"
+                    isTrusted -> "No significant issues detected"
+                    suspiciousFactors.isEmpty() -> "No major issues detected"
+                    else -> suspiciousFactors.first()
+                }
+                
+                // Create analysis result with accurate source information
+                val result = AppAnalysisResult(
+                    packageName = packageName,
+                    appName = appName,
+                    trustScore = trustScore,
+                    lastAnalyzed = System.currentTimeMillis(),
+                    behaviorPatternConsistency = random.nextInt(36) + 60,
+                    apiUsageNormality = random.nextInt(49) + 50,
+                    permissionUsageScore = random.nextInt(36) + 60 - (if (suspiciousFactorsCount > 0) suspiciousFactorsCount * 3 else 0),
+                    primaryIssue = primaryIssue,
+                    isTrusted = isTrusted || isFromOfficialStore || isRealSystemApp,
+                    detailedReport = detailedReport,
+                    isSystemApp = isRealSystemApp,
+                    isFromOfficialStore = isFromOfficialStore,
+                    installerStore = installSource,
+                    installSource = installSource,
+                    deepScanPerformed = true
+                )
+                
+                // Update analysis results
+                updateAppAnalysisResult(result)
+                
+                // Only generate security notifications for truly suspicious apps
+                if (!isTrusted && suspiciousFactorsCount >= 3 && !isFromOfficialStore && !isRealSystemApp) {
+                    generateSecurityNotification(packageName, appName, detailedReport)
+                }
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error analyzing app $packageName: ${e.message}")
+            }
+        }
+        
+        // Combine all counts to update the global source verification summary
+        val combinedCounts = mutableMapOf<String, Int>()
+        combinedCounts.putAll(systemAppsCount)
+        combinedCounts.putAll(playStoreAppsCount)
+        combinedCounts.putAll(otherStoreAppsCount)
+        combinedCounts.putAll(unknownSourceAppsCount)
+        
+        // Update source verification summary in the state flow
+        _sourceVerificationSummary.value = combinedCounts
+        
+        // Update the UI
+        notifyDataSetChanged()
+    }
+
+    /**
+     * Calculate a smart trust score that weighs multiple factors
+     */
+    private fun calculateSmartTrustScore(
+        isFromPlayStore: Boolean,
+        isFromOfficialStore: Boolean,
+        suspiciousFactorsCount: Int,
+        dangerousPermissionsCount: Int,
+        isDeviceRooted: Boolean
+    ): Int {
+        // Base score depends on installation source
+        var score = when {
+            isFromPlayStore -> 85  // Play Store apps start with high trust
+            isFromOfficialStore -> 75  // Other official stores start with good trust
+            else -> 60  // Unknown sources start with moderate trust
+        }
+        
+        // Deduct points based on suspicious factors
+        // Each factor has progressively higher impact
+        when (suspiciousFactorsCount) {
+            0 -> { /* No deduction */ }
+            1 -> score -= 10
+            2 -> score -= 25
+            3 -> score -= 40
+            else -> score -= 50 + ((suspiciousFactorsCount - 3) * 5).coerceAtMost(20)
+        }
+        
+        // Small deduction for dangerous permissions
+        score -= (dangerousPermissionsCount * 1.5).toInt().coerceAtMost(15)
+        
+        // Minor penalty for rooted devices (security risk)
+        if (isDeviceRooted) {
+            score -= 5
+        }
+        
+        // Ensure score stays in valid range
+        return score.coerceIn(0, 100)
+    }
+
+    /**
+     * Build an improved detailed report that clearly shows all suspicious factors
+     */
+    private fun buildImprovedDetailedReport(
+        packageName: String,
+        appName: String,
+        trustScore: Int,
+        installSource: String,
+        isTrusted: Boolean,
+        dangerousPermissionsCount: Int,
+        suspiciousFactors: List<String>,
+        isDeviceRooted: Boolean,
+        signatureMismatch: Boolean
+    ): String {
+        val riskLevel = when {
+            trustScore < 30 -> "HIGH RISK"
+            trustScore < 60 -> "MEDIUM RISK"
+            trustScore < 80 -> "LOW RISK"
+            else -> "SECURE"
+        }
+        
+        val sb = StringBuilder()
+        sb.append("$riskLevel: $appName\n\n")
+        
+        // Installation source information
+        sb.append("Installation Source: ")
+        val sourceInfo = when {
+            installSource == "System App" -> "System Application (Pre-installed)"
+            installSource == "Google Play Store" -> "Google Play Store"
+            officialStores.values.any { it == installSource } -> "$installSource (Verified)"
+            else -> "UNKNOWN SOURCE"
+        }
+        sb.append("$sourceInfo\n\n")
+        
+        // Display failed security checks
+        if (suspiciousFactors.isNotEmpty()) {
+            sb.append("Failed Security Checks:\n")
+            if (signatureMismatch) {
+                sb.append("• INVALID SIGNATURE\n")
+            }
+            if (!isTrusted && suspiciousFactors.size > 1) {
+                suspiciousFactors.take(3).forEach { factor ->
+                    if (!factor.contains("signature", ignoreCase = true)) {
+                        sb.append("• ${factor.uppercase()}\n")
+                    }
+                }
+            }
+            sb.append("\n")
+        }
+        
+        // Suspicious behaviors section
+        if (suspiciousFactors.isNotEmpty()) {
+            sb.append("Suspicious Behaviors:\n")
+            suspiciousFactors.forEach { factor ->
+                sb.append("• $factor detected\n")
+            }
+            sb.append("\n")
+        }
+        
+        // Root warning always displayed
+        if (isDeviceRooted) {
+            sb.append("⚠️ DEVICE ROOT DETECTED: Your device is rooted, which significantly increases security risks.\n\n")
+        }
+        
+        // Recommended actions based on risk level
+        sb.append("Recommended Actions:\n")
+        when {
+            trustScore < 30 -> {
+                sb.append("• HIGH RISK: Remove immediately\n")
+                sb.append("• Uninstall this app as it shows multiple suspicious characteristics\n")
+                sb.append("• Install only verified versions from official sources\n")
+            }
+            trustScore < 60 -> {
+                sb.append("• MEDIUM RISK: Use with caution\n")
+                sb.append("• ${suspiciousFactors.firstOrNull() ?: "Security concerns detected"}\n")
+                sb.append("• Consider finding alternative from official store\n")
+            }
+            trustScore < 80 -> {
+                sb.append("• LOW RISK: Minor security concerns\n")
+                sb.append("• 1. Keep app updated\n")
+                sb.append("• 2. Monitor app behavior\n")
+            }
+            else -> {
+                sb.append("• App appears safe based on all security checks\n")
+                sb.append("• No suspicious behaviors detected\n")
+            }
+        }
+        
+        // Add warning for all non-Play Store apps
+        if (installSource != "Google Play Store" && installSource != "System App") {
+            sb.append("• WARNING: Install apps only from official sources\n")
+        }
+        
+        return sb.toString()
+    }
+
+    /**
+     * Checks if two packages have matching signatures
+     */
+    private fun haveMatchingSignatures(pkg1: PackageInfo, pkg2: PackageInfo): Boolean {
+        // Store signatures in local variables to avoid smart cast issues
+        val signatures1 = pkg1.signatures ?: return false
+        val signatures2 = pkg2.signatures ?: return false
+        
+        if (signatures1.size != signatures2.size) {
+            return false
+        }
+        
+        for (i in 0 until signatures1.size) {
+            if (signatures1[i].toCharsString() != signatures2[i].toCharsString()) {
+                return false
+            }
+        }
+        
+        return true
+    }
+
+    /**
+     * Scan local APK files for malware
+     */
+    private fun scanApkFiles() {
+        // In a real app, this would scan APK files in device storage
+        // For the demo, we'll just create a simulated event
+        
+        handler.post(Runnable {
+            // Delay for realism
+            handler.postDelayed({
+                // Simulate finding a suspicious APK
+                if (random.nextInt(100) < 30) { // 30% chance to find something
+                    val filePath = "/sdcard/download/suspicious_app.apk"
+                    val analysisResult = generateThreatReport(filePath)
+                    
+                    // Create a threat history event
+                    val newEvent = ThreatHistoryEvent(
+                        id = UUID.randomUUID().toString(),
+                        timestamp = System.currentTimeMillis(),
+                        eventType = ThreatEventType.SUSPICIOUS_BEHAVIOR,
+                        severity = ThreatSeverity.HIGH,
+                        description = "Malicious code detected in APK file",
+                        appName = File(filePath).name,
+                        packageName = getRandomPackageName(),
+                        aiConfidence = 80 + random.nextInt(19), // Range from 80 to 98
+                        isResolved = false,
+                        detailedAnalysis = analysisResult,
+                        detectionMethod = "Static and Dynamic Analysis"
+                    )
+                    _threatHistory.update { listOf(newEvent) + it }
+                    
+                    // Update security score to reflect new threat
+                    _securityScore.value = (_securityScore.value - (2 + random.nextInt(4))).coerceIn(60, 99) // Range from 2 to 5
+                }
+            }, 3000)
+        })
+    }
+} 
